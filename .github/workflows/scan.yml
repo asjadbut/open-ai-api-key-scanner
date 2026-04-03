@@ -21,7 +21,8 @@ jobs:
 
       - run: pip install requests
 
-      - run: python scanner.py
+      - name: Run scanner
+        run: python ${{ github.workspace }}/scanner.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
