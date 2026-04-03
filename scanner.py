@@ -3,8 +3,12 @@ import re
 import os
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
+
+# -----------------------
+# Configuration
+# -----------------------
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 WEBHOOK = os.getenv("ALERT_WEBHOOK")
@@ -25,7 +29,7 @@ QUERIES = [
 SEEN_FILE = "seen_hashes.json"
 
 # -----------------------
-# Utils
+# Utility Functions
 # -----------------------
 
 def load_seen():
@@ -50,7 +54,36 @@ def extract_candidates(content):
     return [m[0] or m[1] for m in re.findall(pattern, content)]
 
 # -----------------------
-# GitHub Code Search
+# Confidence Scoring
+# -----------------------
+
+def confidence_score(f):
+    filename = f["file"].lower()
+    high_risk_ext = [".env", ".js", ".config", ".prod"]
+    low_risk_keywords = ["example", "test", "demo", "sample"]
+
+    if any(filename.endswith(ext) for ext in high_risk_ext):
+        confidence = "HIGH"
+    elif any(k in filename for k in low_risk_keywords):
+        confidence = "LOW"
+    else:
+        confidence = "MEDIUM"
+
+    if "commit_date" in f:
+        try:
+            commit_date = datetime.strptime(f["commit_date"], "%Y-%m-%dT%H:%M:%SZ")
+            if commit_date < datetime.utcnow() - timedelta(days=180):
+                if confidence == "HIGH":
+                    confidence = "MEDIUM"
+                elif confidence == "MEDIUM":
+                    confidence = "LOW"
+        except:
+            pass
+
+    return confidence
+
+# -----------------------
+# GitHub Code & Commits
 # -----------------------
 
 def search_github(query):
@@ -69,10 +102,6 @@ def fetch_file(api_url):
         import base64
         return base64.b64decode(data["content"]).decode(errors="ignore")
     return ""
-
-# -----------------------
-# Commit Scanning
-# -----------------------
 
 def get_recent_commits(repo):
     url = f"https://api.github.com/repos/{repo}/commits?per_page=10"
@@ -94,16 +123,15 @@ def scan_commit(repo, sha):
         patch = file.get("patch", "")
         if not patch:
             continue
-
         for key in extract_candidates(patch):
             findings.append({
                 "source": "commit",
                 "repo": repo,
                 "file": file["filename"],
                 "key": key,
-                "url": data["html_url"]
+                "url": data["html_url"],
+                "commit_date": data.get("commit", {}).get("committer", {}).get("date")
             })
-
     return findings
 
 # -----------------------
@@ -113,7 +141,6 @@ def scan_commit(repo, sha):
 def search_gists():
     url = "https://api.github.com/gists/public"
     r = requests.get(url, headers=HEADERS)
-
     findings = []
     if r.status_code != 200:
         return findings
@@ -154,7 +181,6 @@ def scan_paste_feed():
             raw = requests.get(f"https://pastebin.com/raw/{pid}").text
         except:
             continue
-
         for key in extract_candidates(raw):
             findings.append({
                 "source": "paste",
@@ -163,48 +189,32 @@ def scan_paste_feed():
                 "key": key,
                 "url": f"https://pastebin.com/{pid}"
             })
-
     return findings
 
 # -----------------------
-# Scoring
-# -----------------------
-
-def score(f):
-    s = 0
-    if f["source"] == "commit":
-        s += 3
-    elif f["source"] == "gist":
-        s += 2
-    elif f["source"] == "paste":
-        s += 1
-
-    name = f["file"].lower()
-    if any(x in name for x in ["env", "config", "prod"]):
-        s += 3
-    if "test" in name:
-        s -= 2
-    return s
-
-# -----------------------
-# Alert
+# Alerts
 # -----------------------
 
 def send_alert(findings):
     if not WEBHOOK or not findings:
         return
-    text = f"🚨 OpenAI Key Exposure Candidates ({len(findings)})\n\n"
+
+    # Discord embed style alert
+    embeds = []
     for f in findings:
-        text += (
-            f"[{f['source'].upper()}] {f['repo']}\n"
-            f"File: {f['file']}\n"
-            f"Key: {mask_key(f['key'])}\n"
-            f"{f['url']}\n\n"
-        )
+        conf = confidence_score(f)
+        embeds.append({
+            "title": f"[{conf}] {f['source'].upper()} | {f['repo']}",
+            "description": f"**File:** {f['file']}\n**Key:** `{mask_key(f['key'])}`\n[View Source]({f['url']})",
+            "color": 16711680 if conf=="HIGH" else 16753920 if conf=="MEDIUM" else 8421504,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+    payload = {"embeds": embeds}
     try:
-        requests.post(WEBHOOK, json={"content": text})
+        requests.post(WEBHOOK, json=payload)
     except:
-        print("Alert failed")
+        print("Failed to send alert")
 
 # -----------------------
 # Main
@@ -215,7 +225,6 @@ def main():
     all_findings = []
 
     if DUMMY_MODE:
-        # Add a dummy key for testing alerts
         all_findings.append({
             "source": "dummy",
             "repo": "test/repo",
@@ -223,13 +232,11 @@ def main():
             "key": "sk-test12345678901234567890",
             "url": "https://github.com/test/repo"
         })
-
     else:
         # GitHub code + commit scan
         for q in QUERIES:
             items = search_github(q)
-            time.sleep(1)  # rate-limit
-
+            time.sleep(1)
             for item in items:
                 repo = item["repository"]["full_name"]
                 content = fetch_file(item["url"])
@@ -241,8 +248,6 @@ def main():
                         "key": key,
                         "url": item["html_url"]
                     })
-
-                # commit scan
                 for c in get_recent_commits(repo):
                     all_findings.extend(scan_commit(repo, c["sha"]))
                     time.sleep(1)
@@ -253,7 +258,7 @@ def main():
         # paste
         all_findings.extend(scan_paste_feed())
 
-    # deduplicate
+    # Deduplicate
     unique = []
     for f in all_findings:
         h = hash_item(f["key"])
@@ -264,8 +269,8 @@ def main():
 
     save_seen(seen)
 
-    # sort top 10
-    unique = sorted(unique, key=score, reverse=True)[:10]
+    # Sort by confidence (HIGH first)
+    unique = sorted(unique, key=lambda f: ["LOW","MEDIUM","HIGH"].index(confidence_score(f)), reverse=True)[:10]
 
     send_alert(unique)
     print(f"Done. {len(unique)} new findings.")
