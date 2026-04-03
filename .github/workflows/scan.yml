@@ -1,8 +1,8 @@
-name: OpenAI Key Scanner Elite v2
+name: OpenAI Key Scanner Elite
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 6 * * *"   # Runs daily at 6AM UTC
   workflow_dispatch:
 
 permissions:
@@ -27,9 +27,9 @@ jobs:
       - name: Show files for debugging
         run: ls -R
 
-      - name: Run scanner (dummy mode)
+      - name: Run scanner (daily)
         run: python scanner.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
-          DUMMY_MODE: "false"
+          DUMMY_MODE: "false"   # set "true" to test alert without real keys
