@@ -5,24 +5,23 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   scan:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install requests
+      - run: pip install requests
 
-      - name: Run scanner
+      - run: python scanner.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
-        run: python scanner.py
