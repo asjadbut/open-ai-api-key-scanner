@@ -1,4 +1,4 @@
-name: OpenAI Key Scanner
+name: OpenAI Key Scanner Elite v2
 
 on:
   schedule:
@@ -11,6 +11,9 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
 
     steps:
       - uses: actions/checkout@v4
@@ -21,8 +24,12 @@ jobs:
 
       - run: pip install requests
 
-      - name: Run scanner
-        run: python ${{ github.workspace }}/scanner.py
+      - name: Show files for debugging
+        run: ls -R
+
+      - name: Run scanner (dummy mode)
+        run: python scanner.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          DUMMY_MODE: "true"
