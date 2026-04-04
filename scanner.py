@@ -26,6 +26,23 @@ QUERIES = [
 DB_FILE = "findings_db.txt"
 
 # -----------------------
+# Safe Request Wrapper
+# -----------------------
+
+def safe_get(url, headers=None, retries=3, timeout=10):
+    for i in range(retries):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout)
+            if r.status_code == 200:
+                return r
+            else:
+                print(f"[WARN] Status {r.status_code} for {url}")
+        except requests.exceptions.RequestException as e:
+            print(f"[Retry {i+1}] {e}")
+            time.sleep(2)
+    return None
+
+# -----------------------
 # DB Handling
 # -----------------------
 
@@ -90,14 +107,14 @@ def confidence_score(f):
 
 def search_github(query):
     url = f"https://api.github.com/search/code?q={query}&per_page=30"
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code != 200:
+    r = safe_get(url, HEADERS)
+    if not r:
         return []
     return r.json().get("items", [])
 
 def fetch_file(url):
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code != 200:
+    r = safe_get(url, HEADERS)
+    if not r:
         return ""
     data = r.json()
     if "content" in data:
@@ -111,15 +128,15 @@ def fetch_file(url):
 
 def get_commits(repo):
     url = f"https://api.github.com/repos/{repo}/commits?per_page=5"
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code != 200:
+    r = safe_get(url, HEADERS)
+    if not r:
         return []
     return r.json()
 
 def scan_commit(repo, sha):
     url = f"https://api.github.com/repos/{repo}/commits/{sha}"
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code != 200:
+    r = safe_get(url, HEADERS)
+    if not r:
         return []
 
     data = r.json()
@@ -127,6 +144,9 @@ def scan_commit(repo, sha):
 
     for file in data.get("files", []):
         patch = file.get("patch", "")
+        if not patch:
+            continue
+
         for key in extract_keys(patch):
             findings.append({
                 "source": "commit",
@@ -145,8 +165,8 @@ def scan_commit(repo, sha):
 
 def scan_gists():
     findings = []
-    r = requests.get("https://api.github.com/gists/public", headers=HEADERS)
-    if r.status_code != 200:
+    r = safe_get("https://api.github.com/gists/public", HEADERS)
+    if not r:
         return findings
 
     for gist in r.json()[:20]:
@@ -154,10 +174,12 @@ def scan_gists():
             raw_url = file.get("raw_url")
             if not raw_url:
                 continue
-            try:
-                content = requests.get(raw_url).text
-            except:
+
+            r2 = safe_get(raw_url)
+            if not r2:
                 continue
+
+            content = r2.text
 
             for key in extract_keys(content):
                 findings.append({
@@ -176,17 +198,18 @@ def scan_gists():
 
 def scan_paste():
     findings = []
-    try:
-        r = requests.get("https://pastebin.com/archive")
-        ids = re.findall(r'href="/(\w+)"', r.text)
-    except:
+    r = safe_get("https://pastebin.com/archive")
+    if not r:
         return findings
 
+    ids = re.findall(r'href="/(\w+)"', r.text)
+
     for pid in ids[:20]:
-        try:
-            raw = requests.get(f"https://pastebin.com/raw/{pid}").text
-        except:
+        r2 = safe_get(f"https://pastebin.com/raw/{pid}")
+        if not r2:
             continue
+
+        raw = r2.text
 
         for key in extract_keys(raw):
             findings.append({
@@ -200,7 +223,7 @@ def scan_paste():
     return findings
 
 # -----------------------
-# Alerts (Discord Embed)
+# Alerts
 # -----------------------
 
 def send_alert(findings):
@@ -211,7 +234,6 @@ def send_alert(findings):
 
     for f in findings:
         conf = confidence_score(f)
-
         color = 16711680 if conf == "HIGH" else 16753920 if conf == "MEDIUM" else 8421504
 
         embeds.append({
@@ -221,7 +243,10 @@ def send_alert(findings):
             "timestamp": datetime.utcnow().isoformat()
         })
 
-    requests.post(WEBHOOK, json={"embeds": embeds})
+    try:
+        requests.post(WEBHOOK, json={"embeds": embeds})
+    except:
+        print("Webhook failed")
 
 # -----------------------
 # Main
@@ -231,10 +256,9 @@ def main():
     existing = load_db()
     all_findings = []
 
-    # GitHub
     for q in QUERIES:
         items = search_github(q)
-        time.sleep(1)
+        time.sleep(2)
 
         for item in items:
             repo = item["repository"]["full_name"]
@@ -251,13 +275,11 @@ def main():
 
             for c in get_commits(repo):
                 all_findings.extend(scan_commit(repo, c["sha"]))
-                time.sleep(0.5)
+                time.sleep(1)
 
-    # Gists + Paste
     all_findings.extend(scan_gists())
     all_findings.extend(scan_paste())
 
-    # Deduplicate using DB
     new_findings = []
     new_hashes = []
 
@@ -270,10 +292,8 @@ def main():
         new_findings.append(f)
         new_hashes.append(h)
 
-    # Save new hashes
     save_db(new_hashes)
 
-    # Sort by confidence
     new_findings = sorted(
         new_findings,
         key=lambda f: ["LOW", "MEDIUM", "HIGH"].index(confidence_score(f)),
