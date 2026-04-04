@@ -2,34 +2,39 @@ name: OpenAI Key Scanner Elite
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # Runs daily at 6AM UTC
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ github.workspace }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install requests
+      - name: Install deps
+        run: pip install requests
 
-      - name: Show files for debugging
-        run: ls -R
-
-      - name: Run scanner (daily)
+      - name: Run scanner
         run: python scanner.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
-          DUMMY_MODE: ${{ secrets.DUMMY_MODE }}   # set "true" to test alert without real keys
+
+      - name: Commit DB updates
+        run: |
+          git config --global user.name "scanner-bot"
+          git config --global user.email "scanner@bot.com"
+
+          git add findings_db.txt || true
+          git commit -m "Update findings DB" || echo "No changes"
+          git push
