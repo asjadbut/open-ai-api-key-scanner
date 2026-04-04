@@ -25,6 +25,9 @@ QUERIES = [
 
 DB_FILE = "findings_db.txt"
 
+# 🔥 Freshness filter (IMPORTANT)
+MAX_AGE_DAYS = 90
+
 # -----------------------
 # Safe Request Wrapper
 # -----------------------
@@ -36,7 +39,7 @@ def safe_get(url, headers=None, retries=3, timeout=10):
             if r.status_code == 200:
                 return r
             else:
-                print(f"[WARN] Status {r.status_code} for {url}")
+                print(f"[WARN] {r.status_code} {url}")
         except requests.exceptions.RequestException as e:
             print(f"[Retry {i+1}] {e}")
             time.sleep(2)
@@ -72,6 +75,13 @@ def extract_keys(text):
     pattern = r"(sk-[A-Za-z0-9]{20,})|(sess-[A-Za-z0-9]{20,})"
     return [m[0] or m[1] for m in re.findall(pattern, text)]
 
+def is_fresh(date_str):
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
+        return dt >= datetime.utcnow() - timedelta(days=MAX_AGE_DAYS)
+    except:
+        return True  # if unknown, don't block
+
 # -----------------------
 # Confidence Scoring
 # -----------------------
@@ -89,15 +99,11 @@ def confidence_score(f):
         conf = "MEDIUM"
 
     if "commit_date" in f:
-        try:
-            dt = datetime.strptime(f["commit_date"], "%Y-%m-%dT%H:%M:%SZ")
-            if dt < datetime.utcnow() - timedelta(days=180):
-                if conf == "HIGH":
-                    conf = "MEDIUM"
-                elif conf == "MEDIUM":
-                    conf = "LOW"
-        except:
-            pass
+        if not is_fresh(f["commit_date"]):
+            if conf == "HIGH":
+                conf = "MEDIUM"
+            elif conf == "MEDIUM":
+                conf = "LOW"
 
     return conf
 
@@ -142,6 +148,12 @@ def scan_commit(repo, sha):
     data = r.json()
     findings = []
 
+    commit_date = data["commit"]["committer"]["date"]
+
+    # 🔥 Skip old commits completely
+    if not is_fresh(commit_date):
+        return []
+
     for file in data.get("files", []):
         patch = file.get("patch", "")
         if not patch:
@@ -154,7 +166,7 @@ def scan_commit(repo, sha):
                 "file": file["filename"],
                 "key": key,
                 "url": data["html_url"],
-                "commit_date": data["commit"]["committer"]["date"]
+                "commit_date": commit_date
             })
 
     return findings
@@ -170,6 +182,12 @@ def scan_gists():
         return findings
 
     for gist in r.json()[:20]:
+        updated = gist.get("updated_at")
+
+        # 🔥 skip old gists
+        if updated and not is_fresh(updated):
+            continue
+
         for file in gist["files"].values():
             raw_url = file.get("raw_url")
             if not raw_url:
@@ -179,15 +197,14 @@ def scan_gists():
             if not r2:
                 continue
 
-            content = r2.text
-
-            for key in extract_keys(content):
+            for key in extract_keys(r2.text):
                 findings.append({
                     "source": "gist",
                     "repo": gist["owner"]["login"],
                     "file": file["filename"],
                     "key": key,
-                    "url": gist["html_url"]
+                    "url": gist["html_url"],
+                    "commit_date": updated
                 })
 
     return findings
@@ -209,15 +226,14 @@ def scan_paste():
         if not r2:
             continue
 
-        raw = r2.text
-
-        for key in extract_keys(raw):
+        for key in extract_keys(r2.text):
             findings.append({
                 "source": "paste",
                 "repo": "pastebin",
                 "file": pid,
                 "key": key,
-                "url": f"https://pastebin.com/{pid}"
+                "url": f"https://pastebin.com/{pid}",
+                "commit_date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
             })
 
     return findings
